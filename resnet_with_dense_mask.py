@@ -5,7 +5,7 @@ import torch.utils.model_zoo as model_zoo
 
 
 # __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152']
-__all__ = ['ResNet', 'resnet50']
+__all__ = ['ResNet', 'resnet50with_dense_mask']
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
     'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
@@ -20,48 +20,19 @@ def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
 
-def initial(rank=1, tensor_shape=None):
-    multiplier = (1 / rank) ** (1/3)
-    return torch.ones(tensor_shape)*multiplier + 0.08*nn.init.kaiming_normal_(torch.empty(tensor_shape))
+def initial(tensor_shape=None):
+    return torch.ones(tensor_shape) + 0.08*nn.init.kaiming_normal_(torch.empty(tensor_shape))
 
 
-class MaskBlock(nn.Module):
-    def __init__(self, shape, rank):
-        super(MaskBlock, self).__init__()
+class DenseMaskBlock(nn.Module):
+    def __init__(self, shape):
+        super(DenseMaskBlock, self).__init__()
 
-        self.rank = rank
-        self.maskcconv = nn.parameter.Parameter(initial(self.rank, (shape[0], self.rank)), requires_grad=True)
-        self.maskhconv = nn.parameter.Parameter(initial(self.rank, (shape[1], self.rank)), requires_grad=True)
-        self.maskwconv = nn.parameter.Parameter(initial(self.rank, (shape[2], self.rank)), requires_grad=True)
+        self.mask = nn.parameter.Parameter(initial(shape), requires_grad=True)
         self.shape = shape
 
     def forward(self, out):
-        # print(out.shape)
-        # out_f = torch.mul(out, self.maskcconv[:, 0].view(1,-1,1,1))
-        # out_f = torch.mul(out_f, self.maskhconv[:, 0].view(1,1,-1,1))
-        # out_f = torch.mul(out_f, self.maskwconv[:, 0].view(1,1,1,-1))
-        # for r in range(1, self.rank):
-        #     f = torch.mul(out, self.maskcconv[:, r].view(1,-1,1,1))
-        #     f = torch.mul(f, self.maskhconv[:, r].view(1,1,-1,1))
-        #     f = torch.mul(f, self.maskwconv[:, r].view(1,1,1,-1))
-        #     out_f = torch.add(out_f, f)
-        # out = out_f
-
-        out_f = None
-        for r in range(0, self.rank):
-            # f = torch.mul(out, self.maskcconv[:, r].view(1, -1, 1, 1))
-            # f = torch.mul(f, self.maskhconv[:, r].view(1, 1, -1, 1))
-            # f = torch.mul(f, self.maskwconv[:, r].view(1, 1, 1, -1))
-
-            f = torch.mul(self.maskcconv[:, r].view(1, -1, 1, 1), self.maskhconv[:, r].view(1, 1, -1, 1))
-            f = torch.mul(f, self.maskwconv[:, r].view(1, 1, 1, -1))
-            f = torch.mul(out, f)
-            if out_f is None:
-                out_f = f
-            else:
-                out_f = torch.add(out_f, f)
-
-        return out_f
+        return torch.mul(out, self.mask)
 
 
 # class BasicBlock(nn.Module):
@@ -99,7 +70,7 @@ class MaskBlock(nn.Module):
 class Bottleneck(nn.Module):
     expansion = 4
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, mask_shapes=None, first_shape=None, add_mask=False, mask_rank=1):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, add_mask=False):
         super(Bottleneck, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes)
@@ -111,36 +82,20 @@ class Bottleneck(nn.Module):
         self.downsample = downsample
         self.stride = stride
         self.add_mask = add_mask
-        self.mask_rank = mask_rank
-
-        if self.add_mask:
-            if first_shape:
-                self.mask1 = MaskBlock(first_shape, self.mask_rank)
-            else:
-                self.mask1 = MaskBlock((mask_shapes[0] // 4, mask_shapes[1], mask_shapes[2]), self.mask_rank)
-
-            self.mask2 = MaskBlock((mask_shapes[0] // 4, mask_shapes[1], mask_shapes[2]), self.mask_rank)
-            self.mask3 = MaskBlock(mask_shapes, self.mask_rank)
 
     def forward(self, x):
         residual = x
 
         out = self.conv1(x)
         out = self.bn1(out)
-        if self.add_mask:
-            out = self.mask1(out)
         out = self.relu(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
-        if self.add_mask:
-            out = self.mask2(out)
         out = self.relu(out)
 
         out = self.conv3(out)
         out = self.bn3(out)
-        if self.add_mask:
-            out = self.mask3(out)
 
         if self.downsample is not None:
             residual = self.downsample(x)
@@ -153,21 +108,30 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, use_masks, mask_rank=1, num_classes=1000, input_channels=3):
+    def __init__(self, block, layers, use_masks, num_classes=1000, input_channels=3):
         self.inplanes = 64
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0], mask_shapes=[256, 56, 56], first_shape=[64, 56, 56], add_mask=use_masks[0], mask_rank=mask_rank)
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, mask_shapes=[512, 28, 28], first_shape=[128, 56, 56], add_mask=use_masks[1], mask_rank=mask_rank)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, mask_shapes=[1024, 14, 14], first_shape=[256, 28, 28], add_mask=use_masks[2], mask_rank=mask_rank)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, mask_shapes=[2048, 7, 7], first_shape=[512, 14, 14], add_mask=use_masks[3], mask_rank=mask_rank)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool = nn.AvgPool2d(7, stride=2)
 
         self.dropout = nn.Dropout2d(p=0.5, inplace=True)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
+
+        self.use_masks = use_masks
+
+        if self.use_masks[0]:
+            self.mask1 = DenseMaskBlock(shape=[1, 256, 56, 56])
+        if self.use_masks[1]:
+            self.mask2 = DenseMaskBlock(shape=[1, 512, 28, 28])
+        if self.use_masks[2]:
+            self.mask3 = DenseMaskBlock(shape=[1, 1024, 14, 14])
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -177,7 +141,7 @@ class ResNet(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
-    def _make_layer(self, block, planes, blocks, stride=1, mask_shapes=None, first_shape=None, add_mask=False, mask_rank=1):
+    def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -186,10 +150,10 @@ class ResNet(nn.Module):
             )
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, mask_shapes=mask_shapes, first_shape=first_shape, add_mask=add_mask, mask_rank=mask_rank))
+        layers.append(block(self.inplanes, planes, stride, downsample))
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes, mask_shapes=mask_shapes, add_mask=add_mask, mask_rank=mask_rank))
+            layers.append(block(self.inplanes, planes))
 
         return nn.Sequential(*layers)
 
@@ -200,8 +164,14 @@ class ResNet(nn.Module):
         x = self.maxpool(x)
 
         x = self.layer1(x)
+        if self.use_masks[0]:
+            x = self.mask1(x)
         x = self.layer2(x)
+        if self.use_masks[1]:
+            x = self.mask2(x)
         x = self.layer3(x)
+        if self.use_masks[2]:
+            x = self.mask3(x)
         x = self.layer4(x)
 
         x = self.avgpool(x)
@@ -213,17 +183,16 @@ class ResNet(nn.Module):
         return x
 
 
-def resnet50(num_classes, pretrained=True, use_masks=None, mask_rank=1, **kwargs):
+def resnet50with_dense_mask(num_classes, pretrained=True, use_masks=None, **kwargs):
     """Constructs a ResNet-50 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         num_classes (int): Number of classes to predict
         use_masks (list): Whether to use mask in every layer
-        mask_rank (int): Rank of the mask layer
     """
     if use_masks is None:
-        use_masks = [False, False, False, True]
-    model = ResNet(Bottleneck, [3, 4, 6, 3], use_masks, mask_rank=mask_rank, **kwargs)
+        use_masks = [False, False, True]
+    model = ResNet(Bottleneck, [3, 4, 6, 3], use_masks, **kwargs)
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls['resnet50']), strict=False)
     model.fc = nn.Linear(2048, num_classes)
@@ -262,7 +231,7 @@ def resnet50(num_classes, pretrained=True, use_masks=None, mask_rank=1, **kwargs
 #         model.load_state_dict(model_zoo.load_url(model_urls['resnet34']))
 #     return model
 #
-#
+
 # def resnet101(pretrained=False, **kwargs):
 #     """Constructs a ResNet-101 model.
 #     Args:

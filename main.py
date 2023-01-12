@@ -18,6 +18,8 @@ from model_summary import summary
 import wandb
 import random
 
+from resnet_with_dense_mask import resnet50with_dense_mask
+
 # wandb.init(project="My-Imagenet-Sketch", entity="kaykobad")
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -240,14 +242,17 @@ def main():
     wandb.init(project="My-Imagenet-Sketch", entity="kaykobad", name=wandb_name)
     print('number of output layer and dataset: ', num_outputs, dataset)
 
-    model = resnet50(num_outputs, pretrained=True, use_masks=use_masks, mask_rank=mask_rank)
+    if dense_mask:
+        model = resnet50with_dense_mask(num_outputs, pretrained=True, use_masks=use_dense_masks)
+    else:
+        model = resnet50(num_outputs, pretrained=True, use_masks=use_masks, mask_rank=mask_rank)
     model = nn.DataParallel(model)
     model = model.to(device)
 
     for name, param in model.named_parameters():
         if 'fc.' not in name:
             param.requires_grad = False
-        if (optimize_bn and 'bn' in name) or ((True in use_masks) and 'mask' in name):
+        if (optimize_bn and 'bn' in name) or ((True in use_masks) and 'mask' in name) or (dense_mask and (True in use_dense_masks) and 'mask' in name):
             param.requires_grad = True
 
     num_param = count_parameters(model)
@@ -290,14 +295,16 @@ if __name__ == '__main__':
     use_masks = [False, False, False, True]
     mask_rank = 5
     dataset = 'cubs_cropped'
-    checkpoint_suffix = '_mask_last2+fc-50'
+    checkpoint_suffix = '_dense_mask_last3+fc+bn'
     batch_size = 32
     lr = 5e-3
     finetune_epochs = 30
     save_name = 'checkpoints/' + dataset + checkpoint_suffix + '.pth'
     num_outputs = NUM_OUTPUTS[dataset]
-    optimize_bn = False
-    wandb_name = 'Cubs-Mask-Last-2-FC-R50'
+    optimize_bn = True
+    wandb_name = 'Cubs-DenseMask-Last-3-FC+BN'
+    dense_mask = True
+    use_dense_masks = [True, True, True]
 
     # Setting the seed
     torch.manual_seed(0)
