@@ -19,6 +19,7 @@ import wandb
 import random
 
 from resnet_with_dense_mask import resnet50with_dense_mask
+from resnet_with_dense_mask_after_conv import resnet50with_dense_mask_after_conv
 
 # wandb.init(project="My-Imagenet-Sketch", entity="kaykobad")
 
@@ -174,6 +175,14 @@ class Manager(object):
                 best_accuracy = accuracy
                 self.save_model(epoch_idx, best_accuracy, errors, savename)
 
+                # Print Mask
+                # print("Last mask:", self.model.module.layer4[2].mask3.mask.view(1, 1, 1, -1))
+                # print("Last mask norm:", torch.norm(self.model.module.layer4[2].mask3.mask.data))
+                # print("Last mask:", self.model.module.layer4[2].mask3.mask.data)
+                # # print("First mask:", self.model.module.layer1[0].mask1.mask.view(1, 1, 1, -1))
+                # print("First mask norm:", torch.norm(self.model.module.layer1[0].mask1.mask.data))
+                # print("First mask:", self.model.module.layer1[0].mask1.mask.data)
+
         print('Finished finetuning...')
         print('Best error/accuracy: %0.2f%%, %0.2f%%' % (100 - best_accuracy, best_accuracy))
         print('-' * 16)
@@ -242,18 +251,23 @@ def main():
     wandb.init(project="My-Imagenet-Sketch", entity="kaykobad", name=wandb_name)
     print('number of output layer and dataset: ', num_outputs, dataset)
 
-    if dense_mask:
+    if dense_2d_mask:
+        model = resnet50with_dense_mask_after_conv(num_outputs, pretrained=True)
+    elif dense_mask:
         model = resnet50with_dense_mask(num_outputs, pretrained=True, use_masks=use_dense_masks)
     else:
         model = resnet50(num_outputs, pretrained=True, use_masks=use_masks, mask_rank=mask_rank)
     model = nn.DataParallel(model)
     model = model.to(device)
 
+    # TODO: Tune it properly
     for name, param in model.named_parameters():
-        if 'fc.' not in name:
+        if 'fc.' not in name and 'mask' not in name and 'bn' not in name:
             param.requires_grad = False
-        if (optimize_bn and 'bn' in name) or ((True in use_masks) and 'mask' in name) or (dense_mask and (True in use_dense_masks) and 'mask' in name):
-            param.requires_grad = True
+        # if 'fc.' not in name:
+        #     param.requires_grad = False
+        # if (optimize_bn and 'bn' in name) or ((True in use_masks) and 'mask' in name) or (dense_mask and (True in use_dense_masks) and 'mask' in name) or dense_2d_mask:
+        #     param.requires_grad = True
 
     num_param = count_parameters(model)
     print('Total number of parameters: ', num_param)
@@ -270,6 +284,7 @@ def main():
     print("Total params:", total_params, "Trainable params:", trainable_params)
 
     print(torch.cuda.memory_summary(device=None, abbreviated=False))
+    print(model)
 
     manager = Manager(model, batch_size, dataset)
     manager.train(finetune_epochs, optimizers, schedulers, save=True, savename=save_name)
@@ -292,19 +307,20 @@ if __name__ == '__main__':
     }
 
     # Parameters
-    use_masks = [False, False, False, True]
+    use_masks = [False, False, False, False]
     mask_rank = 5
-    dataset = 'cubs_cropped'
-    checkpoint_suffix = '_dense_mask_last3+fc+bn'
+    dataset = 'wikiart'
+    checkpoint_suffix = '_fc+bn'
     batch_size = 32
     lr = 5e-3
     finetune_epochs = 30
     save_name = 'checkpoints/' + dataset + checkpoint_suffix + '.pth'
     num_outputs = NUM_OUTPUTS[dataset]
     optimize_bn = True
-    wandb_name = 'Cubs-DenseMask-Last-3-FC+BN'
-    dense_mask = True
-    use_dense_masks = [True, True, True]
+    wandb_name = 'Wikiart-FC+BN'
+    dense_mask = False
+    dense_2d_mask = False
+    use_dense_masks = [False, False, False]
 
     # Setting the seed
     torch.manual_seed(0)
